@@ -18,8 +18,8 @@ key in an ignored `.env` file or environment variable; do not commit it.
 - **Day 1:** Run `python workshop\Day1\PromptRelay.py` for the four-stage
   meeting-notes prompt comparison. Other Day 1 scripts demonstrate prompting
   and tool calling.
-- **Day 2:** Put source PDFs in `workshop\Day2\sample_corpus`. From that folder,
-  install/start Ollama and pull `nomic-embed-text`, then run
+- **Day 2:** Put source PDFs in `workshop\Day2\sample_corpus`. From
+  `workshop\Day2`, install/start Ollama and pull `nomic-embed-text`, then run
   `python p4.py --input sample_corpus --backend chroma --embedder ollama`.
 - **Day 3:** From `workshop\Day3`, run
   `python D3P3.py --question "What is the fine for a late library book?"`.

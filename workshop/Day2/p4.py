@@ -276,10 +276,10 @@ if __name__ == "__main__":
 
 # Execution
 # # Ingest with Ollama embeddings into Chroma (fastest, no API key needed)
-# python P4.py --backend chroma --embedder ollama --input ./sample_corpus
+# python p4.py --backend chroma --embedder ollama --input ./sample_corpus
 
 # # Switch to FAISS backend — same corpus, different backend, same interface
-# python P4.py --backend faiss --embedder ollama --input ./sample_corpus
+# python p4.py --backend faiss --embedder ollama --input ./sample_corpus
 
 # # Use Gemini embedder (requires GEMINI_API_KEY in .env)
-# python P4.py --backend chroma --embedder gemini --input ./sample_corpus
+# python p4.py --backend chroma --embedder gemini --input ./sample_corpus

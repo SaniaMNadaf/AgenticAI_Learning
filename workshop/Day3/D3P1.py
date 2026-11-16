@@ -81,31 +81,25 @@ print("[retriever] Ready — embedding model:", OLLAMA_EMBED_MODEL, "| chat mode
 # anaphoric questions ("what about its fine?") embed poorly because the vector
 # store has no memory of what "its" refers to. ONE extra Gemini call before
 # retrieval converts them into standalone search queries.
-# REWRITE_PROMPT = """You are a search-query rewriter for a document retrieval system.
-# Rewrite the user question as a single standalone search query that could be
-# matched against a campus handbook. Resolve pronouns and conversation references.
-# Do NOT answer the question. Do NOT add facts that are not implied by the question.
-# If the question is already standalone, return it unchanged.
-#
-# User question: {question}
-#
-# Standalone search query:"""
-#
-#
-# def rewrite_query(question: str, model: str = GEMINI_CHAT_MODEL) -> str:
-#     """
-#     Return a retrieval-friendly standalone version of the question.
-#     Cost: exactly 1 Gemini call (with backoff). Falls back to the original
-#     question if the model returns an empty string — an empty rewrite would
-#     silently destroy retrieval quality.
-#     """
-#     prompt = REWRITE_PROMPT.format(question=question)
-#     rewritten = gemini_text(prompt, model=model)
-#     return rewritten if rewritten else question
-#
-# print(rewrite_query("what about its fine?"))                 # → standalone version
-# print(rewrite_query("How many books can a UG student borrow?"))  # → returned unchanged
-# print(rewrite_query("and the lab rules too?"))               # → resolved into a full query
+REWRITE_PROMPT = """You are a search-query rewriter for a document retrieval system.
+Rewrite the user question as a single standalone search query that could be
+matched against a campus handbook. Resolve pronouns and conversation references.
+Do NOT answer the question. Do NOT add facts that are not implied by the question.
+If the question is already standalone, return it unchanged.
+
+User question: {question}
+
+Standalone search query:"""
+
+
+def rewrite_query(question: str, model: str = GEMINI_CHAT_MODEL) -> str:
+    """
+    Return a retrieval-friendly standalone version of the question.
+    Falls back to the original question if the model returns an empty string.
+    """
+    prompt = REWRITE_PROMPT.format(question=question)
+    rewritten = gemini_text(prompt, model=model)
+    return rewritten if rewritten else question
 # *************************************************************************************************
 def mmr_rerank(
     query_emb: List[float],
@@ -195,8 +189,8 @@ def _get_collection():
         except Exception:
             raise SystemExit(
                 f"[Error] Collection '{COLLECTION_NAME}' not found in ./chroma_db.\n"
-                f"        Run Day 2's P4.py first:\n"
-                f"        python P4.py --backend chroma --embedder ollama --input ./sample_corpus"
+                f"        Run Day 2's p4.py first from workshop/Day2:\n"
+                f"        python p4.py --backend chroma --embedder ollama --input ./sample_corpus"
             )
     return _collection
 
@@ -275,3 +269,142 @@ def retrieve(
 
 # Execution of the code: )
 # python -c "from P1 import retrieve; out = retrieve('What is the fine for late book return?', k=3, mmr=True); print('Query used:', out['query_used']); print('Results:'); [print('Score:', round(r['score'], 3), '|', r['document'][:90]) for r in out['results']]"
+
+# **************************************************************************************************************************************************************************************
+AB_QUESTIONS = [
+    "What are the library opening hours?",
+    "How much is the fine for returning a book late?",
+    "Can I renew a borrowed book?",
+    # "What happens if I lose a library book?",
+    # "How many books can a UG student borrow?",
+    # "How do I book the AI lab?",
+    # "When is the fee payment deadline for odd semesters?",
+    # "What is the late fee penalty for fee payment?",
+    # "How are government scholarships disbursed?",
+]
+
+
+def run_ab_experiment() -> None:
+    """
+    Prints the top-1 hit per variant per question so the class can vote.
+    Two extra deep-dives (full top-5 for plain vs mmr) make the diversity
+    effect visible — not just asserted. 
+    """
+    variants = [
+        ("plain",   dict(mmr=False, rewrite=False)),
+        ("mmr",     dict(mmr=True,  rewrite=False)),
+        ("rewrite", dict(mmr=False, rewrite=True)),
+        ("both",    dict(mmr=True,  rewrite=True)),
+    ]
+
+    print("\n" + "=" * 100)
+    print("  A/B/C/D — top-1 result per variant (vote the best answer for each Q)")
+    print("=" * 100)
+
+    for qi, q in enumerate(AB_QUESTIONS, 1):
+        print(f"\nQ{qi}: {q}")
+        for name, kwargs in variants:
+            out = retrieve(q, k=5, **kwargs)
+            top = out["results"][0] if out["results"] else None
+            if top is None:
+                print(f"  [{name:<8}] (no results)")
+                continue
+            # Collapse newlines so the terminal table stays readable.
+            snippet = top["document"][:95].replace("\n", " ")
+            print(f"  [{name:<8}] score={top['score']:.3f} | {snippet}")
+
+    # full top-5 for plain vs mmr on the first two questions ───
+    # Hrere you can see MMR working: plain returns near-duplicates,
+    # mmr spreads across different sections of the handbook.
+    for q in AB_QUESTIONS[:2]:
+        print(f"\n── Top-5 deep dive: '{q}' ──")
+        for name, use_mmr in (("plain", False), ("mmr", True)):
+            out = retrieve(q, k=5, mmr=use_mmr)
+            print(f"  {name}:")
+            for i, r in enumerate(out["results"], 1):
+                print(f"    [{i}] score={r['score']:.3f} | {r['document'][:80].replace(chr(10), ' ')}")
+
+# **********************************************************************************************************
+from Day3.D3P2 import build_prompt
+
+
+def answer_once(
+    question: str,
+    llm: str = "gemini",
+    k: int = 5,
+    mmr: bool = False,
+    rewrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Minimal end-to-end RAG: retrieve → build numbered-context prompt → generate.
+    Session 1 uses it ONLY to verify the template and record the backend delta;
+    Session 2's rag_engine.py replaces it with the full production engine.
+
+    Returns {"text", "results", "latency_s"}.
+    """
+    t_all = time.perf_counter()
+
+    # Steps 1–3 of the pipeline (rewrite / embed / retrieve) live in retrieve().
+    retrieved = retrieve(question, k=k, mmr=mmr, rewrite=rewrite)
+    results = retrieved["results"]
+
+    # Step 4: render the prompt contract around the retrieved blocks.
+    prompt = build_prompt(question, results)
+
+    # Step 5: generate with whichever free-tier LLM was requested.
+    t_gen = time.perf_counter()
+    if llm == "gemini":
+        text = gemini_text(prompt)                       # backoff included
+    elif llm == "ollama":
+        resp = ollama.chat(
+            model=OLLAMA_CHAT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = (resp["message"].get("content") or "").strip()
+    else:
+        raise ValueError("llm must be 'gemini' or 'ollama'")
+    gen_s = time.perf_counter() - t_gen
+
+    return {
+        "text": text,
+        "results": results,
+        # Per-stage latency so the delta discussion is quantitative, not vibes.
+        "latency_s": {
+            **retrieved["timings"],
+            "generate": round(gen_s, 3),
+            "total": round(time.perf_counter() - t_all, 3),
+        },
+    }
+
+
+# ── Main entry point: A/B experiment + backend delta demo ───────────────────
+
+if __name__ == "__main__":
+    print(" Advanced retrieval A/B (plain | mmr | rewrite | both)")
+    
+    # Part 1: the retrieval vote table (Gemini called only for rewrite variants).
+    run_ab_experiment()
+
+    # Part 2: prompt-contract wiring + Gemini vs Ollama delta.
+    # Three questions is enough to compare quality and latency honestly.
+    DEMO_QUESTIONS = [
+        "What is the fine for returning a book late?",
+        "How do I book the AI lab?",
+        "Can a UG student borrow 5 books?",
+    ]
+
+    print("  ONE-SHOT RAG — gemini-3.6-flash vs gemma2:2b (same prompt, same k)")
+    
+    for llm_name in ("gemini", "ollama"):
+        print(f"\n── backend: {llm_name} ──")
+        for q in DEMO_QUESTIONS:
+            out = answer_once(q, llm=llm_name, k=5)
+            lat = out["latency_s"]
+            print(f"Q: {q}")
+            print(f"  latency: total={lat['total']:.2f}s (retrieve={lat['retrieve_s']:.3f}s, "
+                  f"generate={lat['generate']:.2f}s)")
+            # First 300 chars keeps the terminal readable; full text is in the lab notes.
+            print(f"  answer : {out['text'][:300]}")
+
+    print("\n[Lab] Record quality + latency observations")
+    print("      → section 'Gemini vs Ollama one-shot delta'.")

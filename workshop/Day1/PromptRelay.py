@@ -53,15 +53,44 @@ STAGES = [
     (
         "4. Step-by-step extraction",
         "You are a careful meeting-notes assistant. Extract only explicit action "
-        "items. Do not turn discussion topics without an assigned action into "
+        "items. First identify commitment statements such as \"will send\" and "
+        "\"needs to\", then extract the owner, task, and deadline from each one. "
+        "Do not turn discussion topics without an assigned action into "
         "tasks. Do not invent details; use \"Not specified\" for a missing owner "
-        "or deadline. First provide a brief, auditable summary of the extraction "
-        "steps (not private chain-of-thought), then return only JSON in this shape:\n"
+        "or deadline. Include a brief, auditable summary of those steps, not "
+        "private chain-of-thought. Return JSON in this shape:\n"
         '{"reasoning_steps":["..."],"action_items":'
         '[{"owner":"...","task":"...","deadline":"..."}]}\n\n'
         f"Meeting notes:\n{MEETING_NOTES}",
         True,
     ),
+]
+
+EXPECTED_ACTIONS = [
+    {
+        "owner": "Maya",
+        "task": "Send the revised project timeline",
+        "task_terms": (("revised project timeline", "revised timeline"),
+                       ("send", "deliver", "share", "provide")),
+        "deadline_terms": (("friday",),),
+    },
+    {
+        "owner": "Omar",
+        "task": "Book a room for the user-testing session",
+        "task_terms": (("book", "reserve", "schedule"), ("room",),
+                       ("user-testing", "user testing", "testing session")),
+        "deadline_terms": ((
+            "not specified", "no due date", "no deadline", "not given",
+            "none given", "no specific deadline",
+        ),),
+    },
+    {
+        "owner": "Priya",
+        "task": "Share the accessibility checklist",
+        "task_terms": (("accessibility checklist",),
+                       ("share", "send", "provide", "circulate", "distribute")),
+        "deadline_terms": (("november 20", "november 20th", "nov 20", "nov 20th", "11/20"),),
+    },
 ]
 
 
@@ -77,22 +106,106 @@ def generate(prompt: str, json_output: bool) -> str:
     return (response.text or "").strip()
 
 
-def summarize_output(text: str) -> tuple[bool, int, bool]:
+def _contains_any(text: str, alternatives: tuple[str, ...]) -> bool:
+    return any(term in text for term in alternatives)
+
+
+def _contains_all_groups(text: str, groups: tuple[tuple[str, ...], ...]) -> bool:
+    return all(_contains_any(text, group) for group in groups)
+
+
+def _output_records(text: str) -> tuple[list[dict[str, Any]], bool]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return False, 0, False
+        return [], False
 
-    if not isinstance(data, dict):
-        return True, 0, False
+    if not isinstance(data, dict) or not isinstance(data.get("action_items"), list):
+        return [], False
 
-    items = data.get("action_items")
-    valid_items = isinstance(items, list) and all(
+    items = data["action_items"]
+    valid_items = all(
         isinstance(item, dict)
-        and all(key in item for key in ("owner", "task", "deadline"))
+        and all(isinstance(item.get(key), str) for key in ("owner", "task", "deadline"))
         for item in items
     )
-    return True, len(items) if isinstance(items, list) else 0, valid_items
+    return [item for item in items if isinstance(item, dict)], valid_items
+
+
+def _evaluate_output(text: str) -> dict[str, Any]:
+    records, valid_json = _output_records(text)
+    if records:
+        normalized_records = [
+            " ".join(str(value) for value in record.values()).casefold()
+            for record in records
+        ]
+    else:
+        normalized_records = []
+        lines = [line.strip().casefold() for line in text.splitlines() if line.strip()]
+        owner_positions = [
+            (line_index, item["owner"].casefold())
+            for line_index, line in enumerate(lines)
+            for item in EXPECTED_ACTIONS
+            if item["owner"].casefold() in line
+        ]
+        for position, (line_index, _) in enumerate(owner_positions):
+            next_line = (
+                owner_positions[position + 1][0]
+                if position + 1 < len(owner_positions)
+                else len(lines)
+            )
+            normalized_records.append(" ".join(lines[line_index:next_line]))
+
+    matched_owners: set[str] = set()
+    field_matches = 0
+    for item in EXPECTED_ACTIONS:
+        owner = item["owner"].casefold()
+        for record in normalized_records:
+            if owner not in record:
+                continue
+            owner_match = True
+            task_match = _contains_all_groups(record, item["task_terms"])
+            deadline_match = _contains_all_groups(record, item["deadline_terms"])
+            field_matches += owner_match + task_match + deadline_match
+            if task_match and deadline_match:
+                matched_owners.add(owner)
+            break
+
+    if records:
+        trap_found = any(
+            "onboarding" in " ".join(str(value) for value in record.values()).casefold()
+            for record in records
+        )
+        owners = [
+            str(record.get("owner", "")).strip().casefold()
+            for record in records
+        ]
+        consistency = (
+            valid_json
+            and len(owners) == len(set(owners))
+            and all(owner in {item["owner"].casefold() for item in EXPECTED_ACTIONS}
+                    for owner in owners)
+        )
+    else:
+        trap_found = any(
+            "onboarding" in line
+            and not any(
+                phrase in line
+                for phrase in ("no action", "not assigned", "no owner", "no deadline")
+            )
+            for line in text.casefold().splitlines()
+        )
+        consistency = None
+
+    correct_count = len(matched_owners)
+    return {
+        "valid_json": valid_json,
+        "correct_count": correct_count,
+        "complete": correct_count == len(EXPECTED_ACTIONS),
+        "trap_avoided": not trap_found,
+        "consistent": consistency,
+        "field_accuracy": round(field_matches / (len(EXPECTED_ACTIONS) * 3) * 100),
+    }
 
 
 def main() -> None:
@@ -102,17 +215,35 @@ def main() -> None:
         results.append((title, result))
         print(f"\n--- {title} ---\n{result}")
 
+    print("\n--- Expected action items ---")
+    for item in EXPECTED_ACTIONS:
+        print(
+            f"- {item['owner']}: {item['task']} "
+            f"(deadline: {item['deadline_terms'][0][0]})"
+        )
+
     print("\n--- Comparison ---")
-    print(f"{'Stage':<30} {'Valid JSON':<12} {'Action items':<14} Required fields")
+    print(
+        f"{'Stage':<30} {'Accuracy':<12} {'Complete':<11} "
+        f"{'Trap avoided':<14} {'Consistent':<12} {'Valid JSON'}"
+    )
     for title, result in results:
-        is_json, item_count, has_fields = summarize_output(result)
-        fields = "owner, task, deadline" if has_fields else "not reliably structured"
-        print(f"{title:<30} {str(is_json):<12} {item_count:<14} {fields}")
+        evaluation = _evaluate_output(result)
+        print(
+            f"{title:<30} "
+            f"{evaluation['field_accuracy']}% "
+            f"({evaluation['correct_count']}/3){'':<3} "
+            f"{str(evaluation['complete']):<11} "
+            f"{str(evaluation['trap_avoided']):<14} "
+            f"{str(evaluation['consistent']) if evaluation['consistent'] is not None else 'N/A':<12} "
+            f"{evaluation['valid_json']}"
+        )
 
     print(
-        "\nThe prompts become progressively more specific: role/instructions "
-        "reduce ambiguity, JSON makes the result machine-readable, and the final "
-        "stage adds a concise explanation of extraction decisions."
+        "\nAccuracy is the share of the 9 expected owner/task/deadline fields "
+        "matched. Completeness requires all three action items. Trap avoided "
+        "means the unassigned onboarding topic was not reported as an action. "
+        "Consistency checks structured outputs for valid, unique, expected owners."
     )
 
 
