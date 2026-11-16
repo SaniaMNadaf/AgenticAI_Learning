@@ -134,7 +134,7 @@ def chunk_recursive(text: str, size: int = 800, overlap: int = 120) -> List[str]
 
 # ── Ingest each strategy into its own Chroma collection ──────────────────────
 
-from p1 import embed_ollama, embed_query_ollama
+from P1 import embed_ollama, embed_query_ollama
 
 chroma_client = chromadb.EphemeralClient()   # ephemeral for the experiment — no leftovers
 
